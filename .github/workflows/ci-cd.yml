@@ -1,0 +1,149 @@
+name: CI/CD · Oficina API
+
+on:
+  push:
+    branches: [main, homolog]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    branches: [main, homolog]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: oficina-api
+  EKS_CLUSTER: oficina-eks
+  NAMESPACE: oficina
+  NODE_VERSION: 22
+
+permissions:
+  contents: read
+
+jobs:
+  qualidade:
+    name: Lint, testes e build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Testes unitarios com cobertura
+        run: pnpm test:cov
+
+      - name: Build
+        run: pnpm build
+
+      - name: Validar manifestos do Kubernetes
+        run: |
+          for f in k8s/*.yaml; do
+            python3 -c "import yaml,sys; list(yaml.safe_load_all(open('$f')))" || exit 1
+            echo "ok: $f"
+          done
+
+  imagem:
+    name: Build e push da imagem
+    needs: qualidade
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    outputs:
+      imagem: ${{ steps.push.outputs.imagem }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Garantir o repositorio no ECR
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" 2>/dev/null \
+            || aws ecr create-repository \
+                 --repository-name "$ECR_REPOSITORY" \
+                 --image-scanning-configuration scanOnPush=true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build e push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Exportar a referencia da imagem
+        run: |
+          echo "imagem=${{ steps.ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy no EKS
+    needs: imagem
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'producao' || 'homologacao' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configurar o kubectl
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      - name: Aplicar os manifestos
+        run: |
+          # A imagem do commit substitui o placeholder, garantindo que o rollout
+          # aponte para um digest imutavel em vez de uma tag movel.
+          sed -i "s|IMAGEM_PLACEHOLDER|${{ needs.imagem.outputs.imagem }}|g" k8s/api-deployment.yaml
+          kubectl apply -f k8s/ -n "$NAMESPACE"
+
+      - name: Aguardar o rollout
+        run: kubectl -n "$NAMESPACE" rollout status deployment/oficina-api --timeout=5m
+
+      - name: Smoke test
+        run: |
+          kubectl -n "$NAMESPACE" run smoke-test-${{ github.run_id }} \
+            --image=curlimages/curl:8.11.0 --rm -i --restart=Never --quiet -- \
+            curl -fsS --retry 5 --retry-delay 3 http://oficina-api/api/health
+
+      - name: Verificar que as metricas estao expostas
+        run: |
+          kubectl -n "$NAMESPACE" run metrics-test-${{ github.run_id }} \
+            --image=curlimages/curl:8.11.0 --rm -i --restart=Never --quiet -- \
+            curl -fsS http://oficina-api/api/metrics | grep -q 'oficina_ordens_servico_criadas_total'
+
+      - name: Resumo do deploy
+        run: |
+          {
+            echo "### Deploy concluido"
+            echo '```'
+            echo "imagem: ${{ needs.imagem.outputs.imagem }}"
+            kubectl -n "$NAMESPACE" get pods -l app=oficina-api
+            kubectl -n "$NAMESPACE" get hpa
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY

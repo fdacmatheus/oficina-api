@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oficina-api-config
+  namespace: oficina
+data:
+  NODE_ENV: 'production'
+  PORT: '3000'
+  API_PREFIX: 'api'
+
+  # O schema e aplicado por migration no init container do deploy; a sincronia
+  # automatica do TypeORM fica desligada fora de desenvolvimento.
+  DB_SYNCHRONIZE: 'false'
+  DB_SSL: 'true'
+  AUTO_SEED: 'true'
+
+  # Notificacao por e-mail. Sem credenciais SMTP validas a aplicacao registra a
+  # falha na metrica oficina_integracao_falhas_total e segue operando, em vez de
+  # bloquear a transicao de status da ordem de servico.
+  MAIL_HOST: 'localhost'
+  MAIL_PORT: '1025'
+  MAIL_FROM: 'oficina@exemplo.com.br'
+
+  LOG_LEVEL: 'info'
+  LOG_FORMAT: 'json'
+  METRICS_ENABLED: 'true'
