@@ -13,4 +13,9 @@ export const AppDataSource = new DataSource({
   entities: ['src/**/*.orm-entity.ts'],
   migrations: ['src/shared/database/migrations/*.ts'],
   synchronize: false,
+
+  // O RDS exige TLS. O certificado e emitido por CA propria da AWS, entao a
+  // verificacao da cadeia fica desativada em vez de embarcar o bundle de
+  // certificados da Amazon apenas para rodar migrations.
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
 });
