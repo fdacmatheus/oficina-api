@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_INTERCEPTOR } from '@nestjs/core';
@@ -33,6 +34,13 @@ import { CorrelacaoMiddleware } from './shared/observabilidade/correlacao.middle
         database: config.get<string>('DB_NAME', 'oficina'),
         autoLoadEntities: true,
         synchronize: config.get<string>('DB_SYNCHRONIZE', 'false') === 'true',
+
+        // O schema e criado por migration, nunca por sincronizacao automatica.
+        // Como o Deployment sobe varias replicas ao mesmo tempo, o TypeORM
+        // serializa a execucao pela tabela de controle: a primeira replica
+        // aplica, as demais encontram tudo aplicado.
+        migrations: [join(__dirname, 'shared/database/migrations/*.{js,ts}')],
+        migrationsRun: config.get<string>('DB_MIGRATIONS_RUN', 'true') === 'true',
 
         // O RDS exige TLS. O certificado e emitido por uma CA propria da AWS,
         // entao a verificacao da cadeia fica desativada em vez de embarcar o
