@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     outputs:
-      imagem: ${{ steps.push.outputs.imagem }}
+      imagem: ${{ steps.ref.outputs.imagem }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +94,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Exportar a referencia da imagem
+        id: ref
         run: |
           echo "imagem=${{ steps.ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}" >> $GITHUB_OUTPUT
 
@@ -116,10 +117,20 @@ jobs:
         run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
 
       - name: Aplicar os manifestos
+        env:
+          IMAGEM: ${{ needs.imagem.outputs.imagem }}
         run: |
+          # Sem esta checagem, uma referencia vazia passaria pelo sed e o
+          # Deployment seria aplicado sem imagem.
+          if [ -z "$IMAGEM" ]; then
+            echo "::error::A referencia da imagem chegou vazia do job anterior."
+            exit 1
+          fi
+
           # A imagem do commit substitui o placeholder, garantindo que o rollout
           # aponte para um digest imutavel em vez de uma tag movel.
-          sed -i "s|IMAGEM_PLACEHOLDER|${{ needs.imagem.outputs.imagem }}|g" k8s/api-deployment.yaml
+          sed -i "s|IMAGEM_PLACEHOLDER|$IMAGEM|g" k8s/api-deployment.yaml
+          grep -q 'image: IMAGEM_PLACEHOLDER' k8s/api-deployment.yaml && exit 1
           kubectl apply -f k8s/ -n "$NAMESPACE"
 
       - name: Aguardar o rollout
